@@ -1,0 +1,517 @@
+---
+title: "German Criminal Statistics by Nationality"
+subtitle: "Data Management with R Final Project"
+author: "Keri Hartman"
+date: "15 December 2017"
+output: 
+  pdf_document:
+    fig_height: 3.75
+    fig_width: 7
+fontsize: 11pt 
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(plyr)
+library(stringr)
+library(countrycode)
+library(httr)
+library(rvest)
+library(RColorBrewer)
+library(gridExtra)
+library(plm)
+library(knitr)
+library(stargazer)
+
+knitr::opts_chunk$set(cache=TRUE) 
+```
+
+## Introduction
+
+Few topics generate so much heated debate, both in the political arena and around one’s local *Stammtisch*, as the link between migration, and particularly the presence of asylum seekers, and crime. In my master’s thesis, I plan to use panel data from the German Police Criminal Statistics (*Polizeiliche Kriminalstatistik*, hereafter: PKS) to explore the factors causing variation in crime rates among nationality groups across time. In addition to control variables, such as age, gender, family and educational structure, I plan to analyze the effect of such factors as immigration status (proportion of nationals considered asylum seekers, recognized refugees, with suspended deportation orders, etc. in Germany), religion, and geography in determining crime rates. I will also examine potential changes in the effects of these variables over time, specifically as a result of the more “uncontrolled” arrival of asylum seekers in 2015. This paper represents a first draft of this analysis. In it, I download and clean the PKS data as well as three other datasets with selected control variables, conduct exploratory analyses using a variety of plots and graphs, and run some initial regressions. Throughout, I not only describe my process but also discuss the limitations of my analyses in their current form, highlighting avenues for further refinement in the coming months.
+
+## Data Sources
+
+### Crime data
+
+The main data source for this project were PKS statistics on arrested criminal suspects. These were available for the years 2012-2016 in Excel form from the **[website](https://www.bka.de/DE/AktuelleInformationen/StatistikenLagebilder/PolizeilicheKriminalstatistik/pks_node.html;jsessionid=DE16907336E53706BB37387880B626BB.live2301)** of the German Federal Criminal Police Office *(Bundeskriminalamt)*. Each year's statistics were contained in a separate Excel file; thus, I had five separate datasets after initial imputation, which I combined into a list before conducting further data cleaning. This allowed me to loop through the five annual datasets when running all subsequent data cleaning steps. 
+
+```{r crimesetup, include=FALSE}
+
+# Will probably need to change this
+setwd("/Users/kerihartman/Documents/GitHub/DataMan-FinalProject")
+
+# Import data for each year
+dat2016 <- read_excel("STD-TV-16-T62-TV-Staatsangehoerigkeiten_excel (4).xlsx", 
+                      col_names = TRUE, range = "A5:GQ1067")
+dat2015 <- read_excel("2015_tb62_TatverdaechtigeNichtdeutscheStraftatenStaatsangehoerigkeit_excel.xlsx", 
+                      col_names = TRUE, range = "A5:GR1038")
+dat2014 <- read_excel("2014_tb62_TatverdaechtigeNichtdeutscheStraftatenStaatsangehoerigkeit_excel.xlsx", 
+                      col_names = TRUE, range = "A5:GP929")
+dat2013 <- read_excel("2013_tb62_TatverdaechtigeNichtdeutscheStraftatenStaatsangehoerigkeit_excel.xls", 
+                      col_names = TRUE, range = "A5:GW1011")
+dat2012 <- read_excel("2012_tb62_TatverdaechtigeNichtdeutscheStraftatenStaatsangehoerigkeit_excel.xls", 
+                      col_names = TRUE, range = "A5:GS1012")
+
+# Create a data list
+dfList <- list(dat2012=dat2012, dat2013=dat2013, dat2014=dat2014, dat2015=dat2015, dat2016=dat2016)
+```
+
+To get the datasets into tidy format, I reshaped them so that nationality groups (my panel units) formed the rows and crimes (my variables) formed the columns. I then converted the nationality group names into English. Finally, I combined the five datasets into one panel dataset containing all crimes committed by all nationality groups over the past five years.
+
+In doing so, a few problems emerged. First, the crime descriptions used in the PKS have gone through a number of formatting changes over the past five years, and thus were of limited use for identifying specific crimes over time. Luckily, the PKS also includes codes for each crime that have not changed over the past five years; these were used to generate identifiers that were comparable across time. Second, while most crimes listed in each year's dataset can be assumed to have been committed in the same year, a few were "cold cases" (*Altfälle*) committed by citizens of countries that no longer exist, such as the Sowiet Union or Yugoslavia. These nationality groups were omitted from the dataset for easier comparability.
+
+```{r crimeclean, include=FALSE}
+# Use crime codes as key, drop description strings, and recode total crimes to 999999
+for (i in 1:length(dfList)) {
+  names(dfList[[i]])[1] <- "kennzahl"
+  dfList[[i]][,2] <- NULL
+  dfList[[i]][1,1] <- "999999"
+  dfList[[i]][['kennzahl']] <- paste("a", dfList[[i]][['kennzahl']], sep = "")
+}
+
+# Make data tidy
+for (i in 1:length(dfList)) {
+  dfList[[i]] <- dfList[[i]] %>%
+    tidyr::gather(key = country, value = value,
+                -kennzahl, na.rm = TRUE) %>% 
+    tidyr::spread(key = kennzahl, value = value)
+}  
+
+# Merge datasets
+df <- dplyr::bind_rows(dfList, .id = "year")
+df$year <- sub('^...', '', df$year)
+
+# Clean country names
+
+# Drop countries that no longer exist
+df <- df[!grepl("-Altfälle-", df$country),]
+
+# Combine data for unknown/unlisted
+crimevars <- na.omit(str_extract(names(df),"^a.*$"))
+years <- unique(df$year)
+for(i in years) {
+  df <- rbind(df, c(i, "Unlisted/Unknown", colSums(
+    rbind(as.numeric(df[df$country =="Ungeklärt" & df$year==i,
+                                crimevars]), 
+          as.numeric(df[df$country =="Ohne Angabe" & df$year == i, crimevars])), na.rm = TRUE)))
+}
+
+df <- df[!grepl("Ungeklärt|Ohne Angabe", df$country),]
+
+# Convert names to English
+df$nat <- countrycode(df$country, 'country.name.de', 'country.name.en')
+
+# Hard code the cases that didnt work
+df %>% 
+  filter(is.na(nat), year == "2012") %>% 
+  select(country)
+
+df$nat[df$country == "Großbritannien/Nordirland"] <- "United Kingdom"
+df$nat[df$country == "Kambotscha"] <- "Cambodia"
+df$nat[df$country == "Nichtdeutsche insgesamt"] <- "Foreigners (all)"
+df$nat[df$country == "Staatenlos"] <- "Stateless"
+df$nat[df$country == "Tatverdächtige insgesamt"] <- "Total"
+df$nat[df$country == "Unlisted/Unknown"] <- "Unlisted/Unknown"
+
+df$country <- NULL
+
+```
+
+### Register data
+
+Unfortunately, the PKS does not contain information on the age, gender, marital status, or immigration status of criminal suspects by nationality - despite the fact that these are important predictors of criminal behavior in general and are likely to differ across nationality groups. I thus was forced to rely on register data to obtain the values of these control variables for the general population of each nationality group residing in Germany. These were available in Excel form from the **[website](https://www-genesis.destatis.de/genesis/online/link/tabellen/12521*)** of the German Federal Statistical Office (Destatis) for non-German citizens only. Comparable data for German citizens was not available. 
+
+Due to a paywall, only datasets on gender and marital status could be downloaded. These were again combined into a list before data cleaning. The two Destatis datasets were already in proper format in terms of rows and columns; thus, I only had to convert the header columns for each year into a proper year variable. Afterwards, I again converted the nationality group names into English, removed data for countries that no longer exist, and combined the data for countries that appeared multiple times (e.g. British Overseas Territories became part of an overall figure for the United Kingdom). In addition, the Excel file for marital status listed "-" instead of zero when no members of a nationality group had a given status, which was read as NA during imputation; these were converted to zeros to avoid data loss. 
+
+```{r popsetup, include=FALSE}
+# Import population data
+popgen <- read_excel("gender_nationality.xlsx", col_names = TRUE, range = "A7:D1057")
+popms <- read_excel("familienstand-nationality.xlsx", col_names = TRUE, range = "A7:J1057")
+popList <- list(gen = popgen, ms= popms)
+
+# Clean data, add year, convert to numerics
+for (i in 1:length(popList)) {
+  names(popList[[i]])[1] <- "country"
+  popList[[i]]<-popList[[i]][!(popList[[i]][['country']]=="davon:"),]
+  popList[[i]][["year"]] <- str_extract(popList[[i]][['country']], "(?<=31.12.)....$")
+  popList[[i]] <- fill(popList[[i]], year)
+  popList[[i]] <- popList[[i]][!grepl("31.12", popList[[i]][['country']]),]
+  cols <- names(popList[[i]])
+  cols.char <- c("year","country")
+  cols.num <- cols[!cols %in% cols.char]
+  DF.char <- popList[[i]][cols.char]
+  DF.num <- as.data.frame(lapply(popList[[i]][cols.num],as.numeric))
+  popList[[i]] <- cbind(DF.char, DF.num)
+}
+
+# Remove countries that no longer exist 
+for (i in 1:length(popList)) {
+  popList[[i]] <- popList[[i]][!grepl("Sowjetunion|Jugoslawien|Serbien und Montenegro", 
+                                      popList[[i]][['country']]),]
+}
+
+# Combine data for two Serbias
+for (i in 1:length(popList)) 
+  {
+  cols <- names(popList[[i]])
+  cols.char <- c("year","country")
+  cols.num <- cols[!cols %in% cols.char]
+  for(j in years) 
+    {
+    popList[[i]] <- rbind(popList[[i]], c(j, "Serbia", colSums(
+    rbind(as.numeric(popList[[i]][(popList[[i]][['country']]=="Serbien (einschl. Kosovo) (03.06.2006-16.02.2008)" 
+                                   & popList[[i]][['year']]==j), cols.num]), 
+      as.numeric(popList[[i]][(popList[[i]][['country']]=="Serbien (ohne Kosovo) (ab 17.02.2008)" 
+                               & popList[[i]][['year']]==j), cols.num])), na.rm = TRUE))) 
+    }
+  popList[[i]] <- popList[[i]][!grepl("Serbien", popList[[i]][['country']]),]
+  }
+
+# Combine data for two Sudans
+for (i in 1:length(popList)) 
+{
+  cols <- names(popList[[i]])
+  cols.char <- c("year","country")
+  cols.num <- cols[!cols %in% cols.char]
+  for(j in years) 
+  {
+    popList[[i]] <- rbind(popList[[i]], c(j, "Sudan", colSums(
+      rbind(as.numeric(popList[[i]][(popList[[i]][['country']]=="Sudan (einschließlich Südsudan) (bis 08.07.2011)" 
+                                     & popList[[i]][['year']]==j), cols.num]), 
+            as.numeric(popList[[i]][(popList[[i]][['country']]=="Sudan (ohne Südsudan) (ab 09.07.2011)" 
+                                     & popList[[i]][['year']]==j), cols.num])), na.rm = TRUE))) 
+  }
+  popList[[i]] <- popList[[i]][!grepl("Sudan \\(", popList[[i]][['country']]),]
+}
+
+# Combine data for UK and overseas
+for (i in 1:length(popList)) 
+{
+  cols <- names(popList[[i]])
+  cols.char <- c("year","country")
+  cols.num <- cols[!cols %in% cols.char]
+  for(j in years) 
+  {
+    popList[[i]] <- rbind(popList[[i]], c(j, "United Kingdom", colSums(
+      rbind(as.numeric(popList[[i]][(popList[[i]][['country']]=="Britische Überseegebiete" 
+                                     & popList[[i]][['year']]==j), cols.num]), 
+            as.numeric(popList[[i]][(popList[[i]][['country']]=="Vereinigtes Königreich" 
+                                     & popList[[i]][['year']]==j), cols.num])), na.rm = TRUE))) 
+  }
+  popList[[i]] <- popList[[i]][!grepl("Vereinigtes Königreich|Britische", popList[[i]][['country']]),]
+}
+
+# Convert country names to English, hardcoding cases that didnt work
+for (i in 1:length(popList)) {
+  popList[[i]][['nat']] <- countrycode(popList[[i]][['country']], 'country.name.de', 'country.name.en')
+  popList[[i]][['nat']][(popList[[i]][['country']] == "Staatenlos")] <- "Stateless"
+  popList[[i]][['nat']][(popList[[i]][['country']] == "Ungeklärt / Ohne Angabe")] <- "Unlisted/Unknown"
+  popList[[i]][['nat']][(popList[[i]][['country']] == "Insgesamt")] <- "Foreigners (all)"
+  popList[[i]][['nat']][(popList[[i]][['country']] == "Serbia")] <- "Serbia"
+  popList[[i]][['nat']][(popList[[i]][['country']] == "United Kingdom")] <- "United Kingdom"
+  popList[[i]][['country']] <- NULL
+}
+
+# Convert NAs in marital dataset to zeros
+popList[[2]][is.na(popList[[2]])] <- 0
+
+```
+
+After cleaning the population data in this way, I combined the two control datasets with the main dataset. At this point, a conceptual problem arose due to the fact that the crime data represent a cumulative total of acts that occur throughout the year, whereas the population data are a fixed snapshot on 31 December of each year. I decided to match the number of crimes committed in each year with the population estimates for 31 December of that same year because I assumed that the population was more likely to grow than decline over the course of each year. Thus, taking end-of-year population figures should make my crime rate estimates more conservative. However, this remains just an assumption that will need to be tested during further work on this dataset for my master's thesis. A better method, not implemented at present, might be to take the mean of the population data for the beginning and end of a given year (i.e., 31 December 2011 and 31 December 2012 for 2012).
+
+```{r popmerge, include=FALSE}
+# Merge population and crime datasets
+popdat <- merge(popList[[2]], popList[[1]], by = c("nat", "year"), all = TRUE)
+dat <- merge(popdat, df, by = c("nat", "year"), all = TRUE)
+
+# Delete repeated population variable
+dat$Insgesamt.x <- NULL
+dat$poptotal <- dat$Insgesamt.y
+
+save(dat, file = "CrimeData.Rda")
+```
+
+
+### Geographical Data
+
+Finally, in order to determine whether certain world regions tend to "specialize" in certain crimes, I added a variable classifying each country into the world region to which it belongs. This data was obtained from the a **[nature conservation website](http://www.iucnredlist.org/technical-documents/data-organization/countries-by-regions)** via web scraping because no suitable pre-existing database could be found. After importing the data and separating the imported strings into country and region variables, I converted the country names into the standard format used in the main dataset and merged the two datasets along this variable.
+
+```{r regionsetup, include=FALSE}
+
+# Get world regions via webscraping
+url <- "http://www.iucnredlist.org/technical-documents/data-organization/countries-by-regions"
+url_parsed <- read_html(url)
+css <- "h2+ table td"
+nodes <- html_nodes(url_parsed, css = css) 
+regions <- html_text(nodes)
+
+# Split into two variables
+regionsdf <- data.frame(stringr::str_split(regions, " – to ", simplify = TRUE))
+names(regionsdf)[1] <- "country"
+names(regionsdf)[2] <- "region"
+
+# Hard code cases that didnt work
+str_extract(regionsdf$country,"^.* to .*$")
+regionsdf$region[187] <- "Sub-Saharan Africa" # St Helena
+regionsdf$region[243] <- "South America" # Venezuela 
+regionsdf$region[59] <- "Caribbean Islands" # Curacao
+regionsdf$region[27] <- "South America" # Bolivia
+
+# Convert country names to standard formatting
+regionsdf$nat <- countrycode(regionsdf$country, 'country.name.en', 'country.name.en')
+
+# France matched twice
+regionsdf %>% 
+  group_by(nat) %>% 
+  summarize(count(nat))
+
+regionsdf %>% 
+  filter(nat == "France")
+
+regionsdf <- regionsdf[!grepl("Clipperton Island – see under France", regionsdf$country),]
+
+regionsdf %>% 
+  filter(is.na(nat)) %>% 
+  select(country)
+
+# Hard code some failed cases and drop others
+regionsdf$nat[regionsdf$country == "Finland [excludes the Åland Islands]"] <- "Finland"
+regionsdf$nat[regionsdf$country == "Papua New Guinea [includes the Bismarck Archipelago and the North Solomons]"] <- "Papua New Guinea"
+regionsdf$nat[regionsdf$country == "United Kingdom [excludes Guernsey, Jersey and Isle of Man]"] <- "United Kingdom"
+regionsdf <- regionsdf[!is.na(regionsdf$nat),]
+regionsdf$country <- NULL
+
+# Merge regional data
+dat <- merge(dat, regionsdf, by = "nat", all.x = TRUE)
+
+dat %>% 
+  filter(is.na(region), year == "2012") %>% 
+  select(nat)
+
+# Kosovo was not in regional dataset
+dat$region[dat$nat == "Kosovo"] <- "Europe"
+
+# Recode stateless/unknown
+dat$region <- as.character(dat$region)
+dat$region[dat$nat == "Stateless"] <- "Stateless or unknown"
+dat$region[dat$nat == "Unlisted/Unknown"] <- "Stateless or unknown"
+
+# Convert columns to numerical data
+cols <- names(dat)
+cols.char <- c("year","nat", "region")
+cols.num <- cols[!cols %in% cols.char]
+DF.char <- dat[cols.char]
+DF.num <- as.data.frame(lapply(dat[cols.num],as.numeric))
+dat <- cbind(DF.char, DF.num)
+
+save(dat, file = "CrimeData.Rda")
+
+crimevars <- na.omit(str_extract(names(dat), "^a.*$"))
+
+```
+
+## Exploratory Analyses
+
+After finalizing my dataset, I conducted some further data cleaning and exploratory analyses. The PKS dataset contains information on `r length(crimevars)` separate crime codes, although some of these are summary codes collapsing different types of related crimes into nested hierarchies. In order to reduce this to a more manageable number, I created new variables for major crime categories of interest. Some of these already had PKS summmary codes (e.g., drug crimes, white collar or economic crimes), while others were my own creation (e.g., robbery and theft as a subset of street crimes). In addition, all crime variables were standardized to crime rates per 1000 people for easier interpretation - i.e., a value of five indicates that a given crime was charged five times per 1000 members of a given nationality group in a given year. 
+```{r totcrime, include=FALSE}
+# Create crime rates per 1000 people 
+for (i in 1:length(crimevars)) {
+  dat[,paste("rt", crimevars[i], sep = "")] <- dat[,crimevars[i]] / dat$poptotal * 1000
+}
+
+# Rename selected crime vars for easier usage 
+dat$crtotal <- dat$rta890000 # Total crimes without migration
+dat$crmig <- dat$rta725000 # Migration-related crimes
+dat$crdrug <- dat$rta891000 # Drug crimes
+dat$violent <- dat$rta892000 # Violent crimes total
+dat$rape <- dat$rta111000 # Rape
+dat$murder <- dat$rta010000 + dat$rta020000 # Murder and manslaughter
+dat$whcollar <- dat$rta893000 # White collar crimes
+dat$htraffic <- dat$rta895000 # Human trafficking 
+dat$cyber <- dat$rta897000 # Cyber crimes
+dat$street <- dat$rta899000 # Total street crime
+dat$robbery <- dat$street - dat$rta111100 - dat$rta111200 - dat$rta132000 - dat$rta623000 - dat$rta674100 - dat$rta674300 # Robbery/theft related streeet crime
+
+save(dat, file = "CrimeData.Rda")
+
+popmin <- 20
+```
+
+Importantly, the PKS datset records numbers of crimes, not numbers of unique individuals charged with crimes, meaning that a few especially prolific criminals can artificially inflate a given nationality's crime rate, especially when that nationality has a small overall population. For this reason, I excluded all nationality groups with a population of less than `r popmin` from further analyses. This affected the following nationalities:
+```{r smallpop, echo = FALSE, results='asis'}
+dat2 <- dat %>% 
+  filter(poptotal > popmin)
+
+save(dat2, file = "CrimeDataReduced.Rda")
+
+dftable <- dat %>% 
+  dplyr::filter(poptotal < popmin) %>% 
+  dplyr::select(nat, poptotal, year) %>% 
+  dplyr::group_by(nat) %>% 
+  dplyr::summarize(year = ifelse(length(year) > 1, 
+                                 paste(as.character(min(as.numeric(year))), as.character(max(as.numeric(year))), sep = "-"),
+                                 as.character(year)),
+                   pop = round(mean(poptotal, na.rm = TRUE)))
+
+knitr::kable(dftable, col.names = c("Nationality", "Excluded Years", "Population"))
+
+```
+
+I first sought to get a sense of the prevalence of different types of crimes across time, independent of nationality group. The results can be seen in the graph on the next page. Violent crime (whether public or private), street crime (including street violence, robbery and theft, and property damage), and drug crimes are the most common categories in the dataset, at approximately 6 instances per 1000 people. The lion's share of the street crimes are robberies and thefts, which occur at a rate of approximately `r round(mean(dat2$robbery[dat2$nat == "Foreigners (all)"], na.rm = TRUE), digits = 1)` instances per 1000 people. Rapes, murders, cybercrimes, and economic or white collar crimes occur less frequently, all at rates below 1 instance per 1000 people.
+
+While the comparatively high rate of violent crime may be somewhat surprising, it is important to note that the PKS dataset only includes those crimes for which a suspect has been identified and arrested. This is much more likely to be the case for violent crime than for muggings or property damage, for example, both because the more personal nature of violent crime often makes it easy to identify a suspect, and due to greater police effort in identifying suspects for these more "serious" crimes.
+```{r linegraph, echo=FALSE}
+# Create a data frame of crimes among all foreigners
+dfyrcr <- dat2[dat2$nat == "Foreigners (all)",]
+keeps <- c("year","crdrug", "violent", "rape", "murder", "whcollar", "cyber", "street", "robbery")
+dfyrcr <- dfyrcr[, (names(dfyrcr) %in% keeps)]
+dfyrcr <- dfyrcr %>% 
+  tidyr::gather(key = var, value = value, -year)
+
+# Plot the line graph
+p <- ggplot(data = dfyrcr, mapping = aes(x = year, y = value, group = var, colour = var))
+p + geom_line() + geom_point() + xlab("Year") + ylab("Crimes per 1000 people") +
+  scale_colour_brewer("Type of Crime", palette="Dark2",
+  labels = c("Drug", "Cyber", "Murder and manslaughter", "Rape", "Robbery and theft", "Street", "Violent", "White collar"))
+```
+
+I next examined regional differences in the most frequently-occurring types of crimes. As can be seen from the heat map below, North Africans (including Algerians, Libyans, Moroccans, and Tunisians) have the highest rates of all four frequent types of crimes, while East Asians generally have the lowest rates. On the whole, there is little evidence of regional specialization in different types of crimes, with the exception of drug crimes among South Americans and sub-Saharan Africans. 
+
+```{r heatmap, echo=FALSE}
+hmdf <- aggregate(dat2[,c("crdrug", "violent", "street", "robbery")], 
+                  by = list(dat2$region), mean, na.rm = TRUE)
+hmdf <- hmdf %>% 
+  tidyr::gather(key = var, value = value, -Group.1)
+hmdf$var <- plyr::revalue(hmdf$var, c("crdrug"="drug"))
+
+p <- ggplot(data = hmdf, aes(x = var, y = Group.1)) 
+p + geom_tile(aes(fill = value)) + xlab("") + ylab("") + scale_fill_continuous(name="")
+```
+
+To further explore what might be driving such regional differences, I plotted the total number of crimes commited by members of each nationality group over time, faceted into separate graphs for each region (see below). This revealed that the crime rates for certain regional groups were likely affected by outliers: `r dat2 %>% dplyr::filter(crtotal > 250 & region == "Caribbean Islands" & year == "2012") %>% dplyr::select(nat)` for the Caribbean, `r dat2 %>% dplyr::filter(crtotal > 250 & region == "North Africa" & year == "2015") %>% dplyr::select(nat)` for North Africa, `r dat2 %>% dplyr::filter(crtotal > 250 & region == "South America" & year == "2012") %>% dplyr::select(nat)` for South America, and `r dat2 %>% dplyr::filter(crtotal > 250 & region == "West & Central Asia" & year == "2015") %>% dplyr::select(nat)` for West & Central Asia. Sub-Saharan Africa also stands out in this graph for its wide range of crime rates, likely due to the large number of states contained in this region.
+
+```{r facetwrap, echo=FALSE, warning = FALSE, message = FALSE}
+p <- ggplot(data = dat2[!is.na(dat2$region) & dat2$region != "Stateless or unknown",],
+            mapping = aes(x = year,
+                          y = crtotal))
+p + geom_line(color="gray70", aes(group = nat)) + facet_wrap(~region, ncol = 4) +
+  geom_smooth(aes(group = region), size = 0.8, se = FALSE, color = "black") +
+  labs(x = "Year",
+       y = "Crimes per 1000 People")
+
+```
+
+I next plotted the total number of crimes committed by each nationality group against the population-level control variables for gender and marital status (the different colors correspond to different regions; see legend of the graph on the next page). For easier interpretation, these were simplified to the share of residents who are male and share of residents who are married. Previous sociological analyses of crime indicate that these two factors are important predictors of criminal behavior. 
+
+```{r grcontrols, echo=FALSE, warning = FALSE, message = FALSE}
+# Create control vars
+dat2$maleshare <- dat2$männlich / dat2$poptotal
+dat2$marriedshare <- dat2$verheiratet / dat2$poptotal
+
+save(dat2, file = "CrimeDataReduced.Rda")
+
+# Plot control variables on combined plot
+p2 <- ggplot(data = dat2[dat$nat != "Foreigners (all)",], mapping = aes(x = maleshare, y = crtotal))
+p2 <- p2 + geom_point(mapping = aes(color = region)) + geom_smooth(method = "lm", se = FALSE, color = "black", size = 0.9) + 
+  ylab("") + xlab("Male share") + theme(legend.position="none")
+p1 <- ggplot(data = dat2, mapping = aes(x = marriedshare, y = crtotal))
+p1 <- p1 + geom_point(mapping = aes(color = region)) + geom_smooth(method = "lm", se = FALSE, color = "black", size = 0.9) + 
+  theme(legend.position="none") + ylab("Total crimes per 1000 people") + xlab("Married share") +
+  xlim(0,1)
+grid.arrange(p1, p2, ncol=2)
+```
+
+This was no different in the current dataset, as can be seen from the plots above. Nationality groups with a lower share of married people commit substantially more crimes than nationality groups with a higher share of married people, while the reverse is true of nationality groups with lower and higher shares of males. In addition, the nationality groups in the dataset differ vastly in terms of both gender and marital status, indicating the importance of controlling for these variables in statistical analyses.
+
+As discussed above, I was not able to download population-level data on immigration status for each nationality group due to a paywall on the Destatis website, and thus could not test the relationship between asylum seeking and crime directly. However, I was able to explore this relationship with a proxy variable: the number of migration-related crimes (illegal residency and asylum violations) committed by members of each nationality group in the PKS dataset. 
+
+```{r migcrime, echo=FALSE, message=FALSE, warning = FALSE}
+p <- ggplot(data = dat2[dat2$nat != "Foreigners (all)",], mapping = aes(x = crmig, y = crtotal)) 
+p + geom_point(mapping = aes(color = region)) + labs(color="Region") + 
+  geom_smooth(se = FALSE, method = "lm", color = "black") +
+  xlab("Migration-related crimes") + ylab("Non-migration-related crimes") + 
+  scale_color_hue(labels = as.character(unique(dat2$region[!is.na(dat2$region)])))
+
+```
+
+As can be seen in the graph above, there is a substantial positive correlation between migration-related crimes and non-migration-related crimes in the current dataset. However, this correlation should be interpreted with caution due to the likely non-independence of the two indicators. Police who arrest a criminal suspect for a non-migration-related crime are likely to charge him or her with a migration-related crime as well, if applicable. Thus, nationality groups who commit non-migration-related crimes at higher rates should be more likely to appear in the dataset for migration-related crimes than nationality groups with just as many migration-related offenses in reality but fewer non-migration-related arrests.
+
+## Statistical Analyses
+
+I next ran several regressions to test my major hypotheses, which can be stated more formally as follows:
+
+1. Nationality groups with higher rates of migration-related crimes will also have higher rates of non-migration-related crimes.
+2. Crime rates after 2015 will be significantly higher than crime rates before 2015 due to the "uncontrolled" immigration of potentially criminal asylum seekers in 2015.
+
+I included male share and married share in all models as control variables, and also tested their interaction to see whether it is specifically *unmarried males* who contribute to higher crime rates. 
+
+### OLS Models
+
+In Models 1-3, seen in Table 2 on the next page, I ignored the panel structure of the dataset and conducted pooled cross-sectional regressions. Dummy variables for each panel wave (except 2012, which served as baseline) were included in order to test whether a significant increase in crime rates occurred after 2015's heavy inflow of asylum seekers. This model specification was selected over a simple dummy variable for pre-/post-2015 in order to control for other potential annual effects, such as changes in the underlying data distribution over time.
+
+```{r reg, echo = FALSE, results = 'asis'}
+
+# Pooled cross section
+basepcs <- lm(crtotal ~ factor(year) + marriedshare + maleshare + crmig, data = dat2[dat2$nat != "Foreigners (all)",])
+intpcs <- lm(crtotal ~ factor(year) + marriedshare*maleshare + crmig, data = dat2[dat2$nat != "Foreigners (all)",])
+
+# Regional models
+dat2$nafri <- ifelse(dat2$region == "North Africa", 1, 0)
+dat2$carib <- ifelse(dat2$region == "Caribbean Islands", 1, 0)
+dat2$stateless <- ifelse(dat2$region == "Stateless or unknown", 1, 0)
+save(dat2, file = "CrimeDataReduced.Rda")
+
+regpcs <- lm(crtotal ~ factor(year) + marriedshare + maleshare + crmig + nafri + carib + stateless, data = dat2[dat2$nat != "Foreigners (all)",])
+
+#Fixed effects
+fe <- plm(crtotal ~ factor(year) + marriedshare + maleshare + crmig, data = dat2[dat2$nat != "Foreigners (all)",], model = 'within', index =c('nat', 'year'))
+
+covarlbls <- c(na.omit(str_extract(names(intpcs[[1]]), "(?<=factor\\(year\\))....$")), 
+            "Married share", "Male share", "Migration crimes", "Male x Married Share", "North Africa", "Caribbean", "Stateless or unknown")
+
+stargazer(list(basepcs, intpcs, regpcs), 
+          type = "latex",
+          dep.var.labels = "Crimes per 1000 people",
+          covariate.labels = covarlbls,
+          title = "OLS Regression Results",
+          no.space = FALSE,
+          header = FALSE)
+
+```
+
+Model 1, which includes controls for gender and marital status but not for region, explained roughly 25% of the variance in crime rates (R^2 = 0.255). The coefficient on migration crimes is positive and significant (b = 0.499, p < .01), with two additional migration-related crimes per 1000 residents associated with one additional non-migration-related crime. However, none of the year dummies are statistically significant, indicating that crime rates do not appear to have changed much over time. The coefficient on married is highly significant and in the expected direction (b = -92.099, p < .01): Moving from a 0% marriage rate to a 100% marriage rate is associated with a decline of 92 crimes per 1000 people. The coefficient on male, on the other hand, is not statistically significant, although it is in the expected direction.
+
+In Model 2, I again ran a pooled cross-sectional model, but included an interaction term between married share and male share to test whether the effect of marriage differs among males and females. However, the interaction term was not statistically significant (p > .10); thus, I did not include interaction terms in subsequent models.
+
+Next, I included regional dummy variables in the model in order to test whether migrants from particular world regions have higher crime rates than others. This model has not been shown due to space considerations. However, North Africans, Caribbeans, and people who are stateless or whose nationality is unknown all significantly differed from the baseline. They were thus included in a more limited regional model (Model 3 in the table above). These three regions are associated with substantial higher crimes rates, between 80-90 additional crimes per 1000 people. The fact that North Africans, but not people from West & Central Asia (including the rest of the Middle East), and Caribbeans, but not sub-Saharan Africans, have elevated crime rates indicates that these rates cannot be explained by discriminatory policing alone. It is not simply being Arab or black that leads to higher reported crime rates, but rather factors specific to Caribbean and North African migrants.
+
+The strong positive coefficient on migration crimes was quite robust to model specification in the OLS regressions, barely shifting from Model 1 to Model 3. However, as discussed above, at least part of this relationship is likely due to bias in the way migration-related-crimes are tabulated.
+
+```{r fereg, echo = FALSE, results = 'asis'}
+
+stargazer(list(basepcs, fe),
+          type = "latex",
+          dep.var.labels = "Crimes per 1000 people",
+          covariate.labels = covarlbls[1:7],
+          title = "Fixed Effects Model", 
+          no.space = FALSE,
+          model.numbers = FALSE,
+          header = FALSE
+          )
+```
+
+### Fixed effects model 
+
+In Model 4, seen on the right column of Table 3, I ran a model with time and nationality fixed effects in order to take into account the underlying panel data structure. Fixed effects models are also known as “within” estimators, as they calculate the effect of each independent variable on the dependent variable within each panel unit (i.e. nationality group). This has the effect of controlling for all time-invariant cross-sectional variation, whether it has been explicitly included in the model or not. Thus, fixed effects models can eliminate some forms of omitted variable bias.
+
+The coefficient on migration crimes is no longer significant in the fixed effects model and even has the opposite sign. This means that while the number of migration-related crimes is a strong predictor of non-migration-related crimes at the between-nationalities level, it is not significantly associated with changes in non-migration-related crimes within each nationality over time. This makes intuitive sense, as changes in the number of people of a given nationality arrested for illegal residency or asylum violations over time are likely due just as much to luck or policing priorities as they are to actual changes in the number of undocumented migrants. 
+
+The year dummy for 2016 has become significantly negative in the fixed-effects model. This serves as a sound rejection of Hypothesis 2, as crime fell in 2016 despite the arrival of nearly 1 million asylum seekers over the previous year. However, it is not sufficient evidence to conclude that the newly-arrived asylum seekers had a *negative* effect on crime, as a number of other factors could have led to the decline in 2016. This will need to be further explored after including data for more control variables. 
+
+## Conclusion
+
+In this paper, I conducted initial data cleaning and analysis of PKS data on criminal suspects by nationality for the years 2012-2016, as well as a few control datasets. While a number of problems remain, mostly due to a lack of properly specified control variables, the results provide first indications of the relevance of my research topic and suggest avenues for further analysis. Specifically, there appears to be a strong positive link between illegal migration and crime - although this could well be reduced or eliminated with a better measure of illegal migration - as well as significant regional differences. 
+
+On the other hand, I found no support for the hypothesis that uncontrolled migration after 2015 led to an increase in crime. However, here again model specification issues are a cause for concern, as I would theoretically expect only an increase in crimes among nationality groups that experienced an increase in asylum seekers in 2015. This would require testing an interaction between year and number of asylum seekers. However, I elected not to test such a model in this paper because my proxy for asylum seeking - arrests for illegal entry and asylum violations - does not adequately measure the concept I had hoped to test. 
