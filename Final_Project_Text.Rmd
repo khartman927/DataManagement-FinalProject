@@ -39,7 +39,7 @@ The main data source for this project were PKS statistics on arrested criminal s
 
 ```{r crimesetup, include=FALSE}
 
-# Will probably need to change this
+# Set directory
 setwd("/Users/kerihartman/Documents/GitHub/DataMan-FinalProject")
 
 # Import data for each year
@@ -500,6 +500,7 @@ stargazer(list(basepcs, fe),
           model.numbers = FALSE,
           header = FALSE
           )
+
 ```
 
 ### Fixed effects model 
@@ -515,3 +516,5 @@ The year dummy for 2016 has become significantly negative in the fixed-effects m
 In this paper, I conducted initial data cleaning and analysis of PKS data on criminal suspects by nationality for the years 2012-2016, as well as a few control datasets. While a number of problems remain, mostly due to a lack of properly specified control variables, the results provide first indications of the relevance of my research topic and suggest avenues for further analysis. Specifically, there appears to be a strong positive link between illegal migration and crime - although this could well be reduced or eliminated with a better measure of illegal migration - as well as significant regional differences. 
 
 On the other hand, I found no support for the hypothesis that uncontrolled migration after 2015 led to an increase in crime. However, here again model specification issues are a cause for concern, as I would theoretically expect only an increase in crimes among nationality groups that experienced an increase in asylum seekers in 2015. This would require testing an interaction between year and number of asylum seekers. However, I elected not to test such a model in this paper because my proxy for asylum seeking - arrests for illegal entry and asylum violations - does not adequately measure the concept I had hoped to test. 
+
+
