@@ -7,10 +7,18 @@
 #    http://shiny.rstudio.com/
 #
 
+# Load libraries
 library(shinydashboard)
 library(ggplot2)
 library(dplyr)
 library(plotly)
+
+# Set working directiory
+setwd("/Users/kerihartman/Documents/GitHub/DataMan-FinalProject")
+
+# Load Data
+load("CrimeDataReduced.Rda")
+
 
 lbls <- c("Total crime", "Violent crime", "Street crime", "Robbery and theft", "Murder and manslaughter", 
             "Rape", "Migration crimes", "Drug crimes", "White collar crimes", "Human trafficking", "Cybercrime", "Male Share", "Married Share")
